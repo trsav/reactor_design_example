@@ -43,9 +43,10 @@ import tensorflow_probability.substrates.jax as tfp
 from dataclasses import dataclass
 from jaxtyping import Array, Float, install_import_hook
 
-# Import GPJax with beartype (optional, but good practice)
 with install_import_hook("gpjax", "beartype.beartype"):
     import gpjax as gpx
+    from gpjax.kernels.computations import DenseKernelComputation
+    from gpjax.parameters import PositiveReal, Static  # Import parameter types
 
 
 # Helper function (ensure jnp usage)
@@ -54,64 +55,123 @@ def angular_distance(x, y, c):
     return jnp.abs((x - y + c) % (c * 2) - c)
 
 
-# Updated Polar Kernel Class
 @dataclass
 class Polar(gpx.kernels.AbstractKernel):
-    """Custom kernel for polar coordinates (Updated for GPJax >= 0.9.0)."""
+    """
+    Custom kernel for polar coordinates (Updated for GPJax >= 0.8.0).
+    Based on Padonou & Roustant (2015): https://hal.inria.fr/hal-01119942v1
+    """
 
-    period = gpx.parameters.Static(2 * jnp.pi)
-    tau = gpx.parameters.PositiveReal(jnp.array([4.0]))
+    # Define parameters with types
+    period: Static = Static(jnp.array(2 * jnp.pi))
+    tau: PositiveReal = PositiveReal(
+        jnp.array(4.0)
+    )  # Initial value 4.0, constrained > 0
+
+    def __init__(
+        self,
+        period: float = 2 * jnp.pi,
+        tau: float = 4.0,  # Default initial value
+        active_dims: list[int] | slice | None = None,
+        n_dims: int | None = None,
+        **kwargs,  # Allow passing other args like parameter definitions
+    ):
+        super().__init__(
+            active_dims=active_dims,
+            n_dims=n_dims,
+            compute_engine=DenseKernelComputation(),
+        )
+
+        self.period = kwargs.get("period", Static(jnp.array(period)))
+        self.tau = kwargs.get("tau", PositiveReal(jnp.array(tau)))
 
     def __call__(
         self, x: Float[Array, "1 D"], y: Float[Array, "1 D"]
     ) -> Float[Array, "1"]:
-        c = self.period.value / 2
-        t = angular_distance(x.flatten(), y.flatten(), c)
-        # Access parameter value using.value
-        K = (1 + self.tau.value * t / c) * jnp.clip(
-            1 - t / c, 0.0, jnp.inf
-        ) ** self.tau.value
-        return K.squeeze()
+        """Compute the kernel value between two single points in polar coordinates."""
+        c = self.period.value / 2.0  # Access parameter value using .value
+        t = angular_distance(
+            x.squeeze(), y.squeeze(), c
+        )  # Ensure inputs are scalar-like for distance
+        # Access parameter value using .value
+        tau_val = self.tau.value
+        # Clip term (1 - t/c) must be non-negative before exponentiation
+        base = jnp.clip(1.0 - t / c, 0.0, jnp.inf)
+        K = (1.0 + tau_val * t / c) * base**tau_val
+        return K.squeeze()  # Return scalar value
 
 
-# Updated GP Interpolation Function
-def gp_interpolate_polar(X, y, n_interp):
-    """Interpolate polar coordinates using Gaussian process (Updated for GPJax >= 0.9.0)."""
-    key = jr.PRNGKey(1)  # Define key locally or pass as argument
+# Updated GP Interpolation Function (aligned with GPJax >= 0.8.0)
+def gp_interpolate_polar(
+    X: Float[Array, "N 1"],
+    y: Float[Array, "N 1"],
+    n_interp: int,
+    learning_rate: float = 0.05,
+    num_iters: int = 500,
+    seed: int = 1,
+):
+    """
+    Interpolate polar coordinates using a Gaussian process with a Polar kernel.
 
-    # Generate target angles
+    Args:
+        X: Input angles (N, 1).
+        y: Corresponding radii or values (N, 1).
+        n_interp: Number of points to interpolate onto around the circle.
+        learning_rate: Learning rate for the AdamW optimizer.
+        num_iters: Number of optimization iterations.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Tuple[Float[Array, "M 1"], Float[Array, "M 1"]]: Interpolated angles and predicted means.
+    """
+    key = jr.PRNGKey(seed)
+
+    # Ensure data is in JAX arrays and correct shape/type
+    X = jnp.asarray(X, dtype=jnp.float64).reshape(-1, 1)
+    y = jnp.asarray(y, dtype=jnp.float64).reshape(-1, 1)
+
+    # Generate target angles for interpolation
     angles = jnp.linspace(0, 2 * jnp.pi, num=n_interp).reshape(-1, 1)
-    X = X.astype(jnp.float64)  # Use jnp.float64 for JAX types
-    y = y.astype(jnp.float64).reshape(-1, 1)  # Ensure y is 2D
 
     # Create dataset
     D = gpx.Dataset(X=X, y=y)
 
     # Define polar Gaussian process components
-    PKern = Polar()
+    PKern = Polar()  # Instantiate the updated Polar kernel
     meanf = gpx.mean_functions.Zero()
+    # Use D.n for number of datapoints
     likelihood = gpx.likelihoods.Gaussian(num_datapoints=D.n)
+
+    # Define the model using the Prior * Likelihood syntax
     prior = gpx.gps.Prior(mean_function=meanf, kernel=PKern)
     posterior = prior * likelihood
 
-    # Define the objective function (negative conjugate MLL)
-    objective = jit(
-        lambda model, train_data: -gpx.objectives.conjugate_mll(model, train_data)
-    )
+    # Define the objective function (negative conjugate Marginal Log-Likelihood)
+    # Use gpx.objectives module
+    objective = jit(gpx.objectives.conjugate_mll(negative=True))
 
-    # Optimise GP's marginal log-likelihood using AdamW
+    # Define the optimizer using Optax
+    optim = ox.adamw(learning_rate=learning_rate)
+
+    # Optimise GP's marginal log-likelihood using gpx.fit (for gradient-based optim)
+    # gpx.fit returns the optimized model state and the optimization history
     opt_posterior, history = gpx.fit(
         model=posterior,
         objective=objective,
         train_data=D,
-        optim=ox.adamw(learning_rate=0.05),
-        num_iters=500,
+        optim=optim,
+        num_iters=num_iters,
         key=key,
+        # verbose=True # Uncomment for optimization progress
     )
 
-    # Generate predictions
+    # Generate predictions at the interpolation angles
+    # predict gives the latent function distribution
     latent_pred = opt_posterior.predict(angles, train_data=D)
+    # Pass the latent distribution through the likelihood to get the predictive distribution
     predictive_dist = opt_posterior.likelihood(latent_pred)
+
+    # Extract the mean of the predictive distribution
     mu = predictive_dist.mean()
 
     return angles, mu
