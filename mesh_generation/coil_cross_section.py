@@ -142,27 +142,16 @@ def gp_interpolate_polar(
     # Use D.n for number of datapoints
     likelihood = gpx.likelihoods.Gaussian(num_datapoints=D.n)
 
-    # Define the model using the Prior * Likelihood syntax
+    # define the model using the Prior * Likelihood syntax
     prior = gpx.gps.Prior(mean_function=meanf, kernel=PKern)
     posterior = prior * likelihood
 
-    # Define the objective function (negative conjugate Marginal Log-Likelihood)
-    # Use gpx.objectives module
-    objective = jit(gpx.objectives.conjugate_mll(negative=True))
-
-    # Define the optimizer using Optax
-    optim = ox.adamw(learning_rate=learning_rate)
-
-    # Optimise GP's marginal log-likelihood using gpx.fit (for gradient-based optim)
-    # gpx.fit returns the optimized model state and the optimization history
-    opt_posterior, history = gpx.fit(
+    # train hyperparameters
+    opt_posterior, history = gpx.fit_scipy(
         model=posterior,
-        objective=objective,
+        # we use the negative mll as we are minimising
+        objective=lambda p, d: -gpx.objectives.conjugate_mll(p, d),
         train_data=D,
-        optim=optim,
-        num_iters=num_iters,
-        key=key,
-        # verbose=True # Uncomment for optimization progress
     )
 
     # Generate predictions at the interpolation angles
@@ -172,7 +161,7 @@ def gp_interpolate_polar(
     predictive_dist = opt_posterior.likelihood(latent_pred)
 
     # Extract the mean of the predictive distribution
-    mu = predictive_dist.mean()
+    mu = predictive_dist.mean
 
     return angles, mu
 
@@ -516,6 +505,7 @@ def create_mesh(x, z, path: str):
     data["x"], data["y"], data["z"], data["t"], data["t_x"] = add_start(
         data["x"], data["y"], data["z"], data["t"], data["t_x"], L
     )
+    abs_path = os.path.abspath(path)
 
     # Initialize mesh
     mesh = Mesh()
@@ -530,7 +520,7 @@ def create_mesh(x, z, path: str):
 
     # Copy mesh template folder
     try:
-        shutil.copytree("mesh_generation/mesh", path)
+        shutil.copytree("mesh_generation/mesh", abs_path)
     except:
         print("Folder exists")
 
@@ -575,7 +565,7 @@ def create_mesh(x, z, path: str):
     axs[2].set_xlabel("x", fontsize=14)
 
     # Save initial visualization
-    plt.savefig(path + "/points.png", dpi=300)
+    plt.savefig(abs_path + "/points.png", dpi=300)
 
     # Convert lists to arrays
     p_list = np.asarray(np.array(p_list))
@@ -590,7 +580,7 @@ def create_mesh(x, z, path: str):
             )
 
     # Save GP slices visualisation
-    fig.savefig(path + "/gp_slices.png", dpi=300)
+    fig.savefig(abs_path + "/gp_slices.png", dpi=300)
 
     # Create polar plots of cross-sections
     figc, axsc = plt.subplots(
@@ -638,7 +628,7 @@ def create_mesh(x, z, path: str):
         ax.plot(theta, r, alpha=1, c="k", lw=2.5)
         i += 1
 
-    figc.savefig(path + "/points_short.png", dpi=300)
+    figc.savefig(abs_path + "/points_short.png", dpi=300)
 
     # Convert to cylindrical coordinates
     p_cylindrical_list = []
@@ -700,10 +690,10 @@ def create_mesh(x, z, path: str):
                 lw=0.5,
             )
 
-    # Save interpolated visualization
-    fig.savefig(path + "/interpolated.png", dpi=300)
+    # Save interpolated visualisation
+    fig.savefig(abs_path + "/interpolated.png", dpi=300)
 
-    # Create pre-render visualization
+    # Create pre-render visualisation
     fig_i, axs_i = plt.subplots(1, 3, figsize=(10, 3), subplot_kw=dict(projection="3d"))
     fig_i.tight_layout()
 
@@ -735,7 +725,7 @@ def create_mesh(x, z, path: str):
                 lw=0.5,
             )
 
-    # Configure visualization
+    # Configure visualisation
     for ax in axs_i:
         ax.set_box_aspect(
             [ub - lb for lb, ub in (getattr(ax, f"get_{a}lim")() for a in "xyz")]
@@ -756,7 +746,7 @@ def create_mesh(x, z, path: str):
     axs_i[2].set_ylabel("y", fontsize=14)
     axs_i[2].set_xlabel("x", fontsize=14)
 
-    plt.savefig(path + "/pre-render.png", dpi=600)
+    plt.savefig(abs_path + "/pre-render.png", dpi=600)
 
     # Define color for rendering
     col = (212 / 255, 41 / 255, 144 / 255)
@@ -927,9 +917,11 @@ def create_mesh(x, z, path: str):
 
     # Generate mesh file and run blockMesh
     print("Writing geometry...")
-    mesh.write(output_path=os.path.join(path, "system", "blockMeshDict"), geometry=None)
+    mesh.write(
+        output_path=os.path.join(abs_path, "system", "blockMeshDict"), geometry=None
+    )
     print("Running blockMesh...")
-    command = path + " /Allmesh.sh"
+    command = abs_path + " /Allmesh.sh"
     process = subprocess.Popen(command, stdout=subprocess.PIPE, shell=True)
     out, err = process.communicate()
     return
