@@ -1,0 +1,15 @@
+#!/bin/bash
+cd "${0%/*}" || exit
+
+source /opt/OpenFOAM/OpenFOAM-v1906/etc/bashrc
+source /opt/OpenFOAM/OpenFOAM-v1906/bin/tools/RunFunctions
+source /opt/OpenFOAM/OpenFOAM-v1906/bin/tools/CleanFunctions
+
+cleanCase
+touch case.foam
+
+runApplication blockMesh
+runApplication checkMesh -constant
+runApplication setsToZones -noFlipMap -constant
+
+cat log.checkMesh
